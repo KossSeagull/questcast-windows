@@ -21,6 +21,7 @@ class QuestCastUI : Form
     readonly Label stateLabel = new Label();
     readonly Label detailLabel = new Label();
     readonly Label hintLabel = new Label();
+    readonly Label sleepLabel = new Label();
     readonly Button stopButton = new Button();
     readonly Timer timer = new Timer();
 
@@ -28,6 +29,7 @@ class QuestCastUI : Form
     int idleTicks = 0;
     string adbPath;
     bool sleepSuppressed = false;
+    int retryTicks = 0;
 
     [STAThread]
     static void Main()
@@ -61,11 +63,14 @@ class QuestCastUI : Form
 
         hintLabel.Font = new Font("Segoe UI", 10F);
         hintLabel.ForeColor = Color.FromArgb(130, 136, 150);
-        hintLabel.SetBounds(24, 96, 412, 52);
+        hintLabel.SetBounds(24, 94, 412, 34);
+
+        sleepLabel.Font = new Font("Segoe UI", 9F);
+        sleepLabel.SetBounds(24, 130, 412, 24);
 
         stopButton.Text = "Stop";
         stopButton.Font = new Font("Segoe UI", 10F);
-        stopButton.SetBounds(24, 158, 110, 32);
+        stopButton.SetBounds(24, 162, 110, 32);
         stopButton.FlatStyle = FlatStyle.Flat;
         stopButton.BackColor = Color.FromArgb(44, 48, 58);
         stopButton.ForeColor = Color.White;
@@ -74,6 +79,7 @@ class QuestCastUI : Form
         Controls.Add(stateLabel);
         Controls.Add(detailLabel);
         Controls.Add(hintLabel);
+        Controls.Add(sleepLabel);
         Controls.Add(stopButton);
 
         FormClosing += delegate { StopAll(); };
@@ -185,10 +191,32 @@ class QuestCastUI : Form
         Kill("mpv");
     }
 
+    // Keep trying: the headset may only become reachable later, when a cable is plugged
+    // in or ADB over Wi-Fi is switched on.
+    void UpdateSleepState()
+    {
+        if (!sleepSuppressed && adbPath != null && (retryTicks++ % 10 == 0))
+            SetSleepSuppressed(true);
+
+        if (sleepSuppressed)
+        {
+            sleepLabel.Text = "Headset sleep: off — it can be taken off without stopping";
+            sleepLabel.ForeColor = Color.FromArgb(120, 220, 150);
+        }
+        else
+        {
+            sleepLabel.Text = adbPath == null
+                ? "Headset sleep: on — adb not found, stream stops when taken off"
+                : "Headset sleep: on — connect a cable to keep streaming when taken off";
+            sleepLabel.ForeColor = Color.FromArgb(220, 180, 120);
+        }
+    }
+
     // Reads the tail of the receiver's log and turns its counters into something
-    // readable. Format: frames=N (+M/5s) dropped=D ... audio=A/B alate=X late=L
+    // readable. Format: frames=N (+M/5s) dropped=D ... audio=A/B late=L q=avg/max
     void Refresh_()
     {
+        UpdateSleepState();
         string tail = ReadTail();
         if (tail == null)
         {
@@ -226,11 +254,8 @@ class QuestCastUI : Form
         string sound = audioIn > 0 ? "sound on" : "no sound";
         string losses = (dropped + lateDrop) == 0 ? "no losses" : (dropped + lateDrop) + " frames lost";
 
-        string hint = sleepSuppressed
-            ? "The headset will keep streaming when taken off, so it can be passed around."
-            : "Note: the stream stops when the headset comes off (adb not available).";
-
-        Set("Streaming", fps + " fps  ·  " + sound + "  ·  " + losses, hint);
+        Set("Streaming", fps + " fps  ·  " + sound + "  ·  " + losses,
+            "Close the player window or press Stop to finish.");
 
         // Get out of the player's way. Sitting on top of a fullscreen video window makes
         // Windows throttle its presentation, the player falls behind, and frames start
