@@ -26,6 +26,8 @@ class QuestCastUI : Form
 
     long lastFrames = -1;
     int idleTicks = 0;
+    string adbPath;
+    bool sleepSuppressed = false;
 
     [STAThread]
     static void Main()
@@ -76,7 +78,9 @@ class QuestCastUI : Form
 
         FormClosing += delegate { StopAll(); };
 
+        adbPath = FindAdb();
         StartStream();
+        if (adbPath != null) SetSleepSuppressed(true);   // may be a no-op if adb sees no device
 
         timer.Interval = 1000;
         timer.Tick += delegate { Refresh_(); };
@@ -100,6 +104,71 @@ class QuestCastUI : Form
         catch (Exception e) { stateLabel.Text = "Could not start: " + e.Message; }
     }
 
+    // A Quest stops streaming the moment it thinks it has been taken off, which is
+    // exactly what happens when the headset is passed from one person to the next.
+    // Telling it the proximity sensor is covered keeps the stream alive - and it is
+    // put back to normal on exit, so the headset is not left in that state.
+    //
+    // Best effort only: this needs adb to reach the headset, and ADB over Wi-Fi does
+    // not survive a headset reboot. If it is unavailable, streaming still works, the
+    // stream just stops when the headset comes off.
+    static string FindAdb()
+    {
+        var candidates = new[] {
+            Path.Combine(Path.GetDirectoryName(Application.ExecutablePath), "adb.exe"),
+            @"C:\Program Files\Meta Quest Developer Hub\resources\bin\adb.exe",
+            @"C:\Program Files (x86)\Meta Quest Developer Hub\resources\bin\adb.exe",
+        };
+        foreach (var c in candidates) if (File.Exists(c)) return c;
+
+        var path = Environment.GetEnvironmentVariable("PATH");
+        if (path != null)
+            foreach (var part in path.Split(';'))
+            {
+                try
+                {
+                    var p = Path.Combine(part.Trim(), "adb.exe");
+                    if (part.Trim().Length > 0 && File.Exists(p)) return p;
+                }
+                catch { }
+            }
+        return null;
+    }
+
+    static string RunAdb(string exe, string args)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(exe, args);
+            psi.CreateNoWindow = true;
+            psi.UseShellExecute = false;
+            psi.RedirectStandardOutput = true;
+            psi.RedirectStandardError = true;
+            using (var p = Process.Start(psi))
+            {
+                string outp = p.StandardOutput.ReadToEnd();
+                p.WaitForExit(6000);
+                return outp;
+            }
+        }
+        catch { return null; }
+    }
+
+    bool AdbSeesHeadset()
+    {
+        string devices = RunAdb(adbPath, "devices");
+        return devices != null && Regex.IsMatch(devices, @"\S+\s+device\s*$", RegexOptions.Multiline);
+    }
+
+    void SetSleepSuppressed(bool on)
+    {
+        if (adbPath == null) return;
+        if (on && !AdbSeesHeadset()) return;
+        string action = on ? "prox_close" : "automation_disable";
+        RunAdb(adbPath, "shell am broadcast -a com.oculus.vrpowermanager." + action);
+        sleepSuppressed = on;
+    }
+
     static void Kill(string name)
     {
         foreach (var p in Process.GetProcessesByName(name))
@@ -111,6 +180,7 @@ class QuestCastUI : Form
     void StopAll()
     {
         timer.Stop();
+        if (sleepSuppressed) SetSleepSuppressed(false);   // leave the headset as we found it
         Kill("QuestCastRx");
         Kill("mpv");
     }
@@ -148,6 +218,7 @@ class QuestCastUI : Form
         {
             Set("Waiting for the headset", "",
                 "Open QuestCast in the headset and connect to this PC.");
+            if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
             return;
         }
 
@@ -155,9 +226,16 @@ class QuestCastUI : Form
         string sound = audioIn > 0 ? "sound on" : "no sound";
         string losses = (dropped + lateDrop) == 0 ? "no losses" : (dropped + lateDrop) + " frames lost";
 
-        Set("Streaming",
-            fps + " fps  ·  " + sound + "  ·  " + losses,
-            "Close the player window or press Stop to finish.");
+        string hint = sleepSuppressed
+            ? "The headset will keep streaming when taken off, so it can be passed around."
+            : "Note: the stream stops when the headset comes off (adb not available).";
+
+        Set("Streaming", fps + " fps  ·  " + sound + "  ·  " + losses, hint);
+
+        // Get out of the player's way. Sitting on top of a fullscreen video window makes
+        // Windows throttle its presentation, the player falls behind, and frames start
+        // being dropped - which looks like heavy artefacting.
+        if (WindowState != FormWindowState.Minimized) WindowState = FormWindowState.Minimized;
     }
 
     void Set(string state, string detail, string hint)

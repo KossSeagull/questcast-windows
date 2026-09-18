@@ -39,13 +39,14 @@ class QuestCastRx
     static Stream stdout;
     static long framesOut = 0, framesDropped = 0, bytesOut = 0;
     static long mdnsRx = 0, mdnsTx = 0, dataPkts = 0, lateDrops = 0, audioPkts = 0, audioOut = 0, audioLate = 0;
+    static int qDepthMax = 0, qDepthSum = 0, qDepthN = 0;
 
     // Writing to the player's pipe blocks whenever it falls behind. Doing that on the
     // receive thread stops us reading the socket, so datagrams get lost and the picture
     // breaks up. Hand finished access units to a writer thread through a short queue
     // instead, and throw away the oldest ones when the player cannot keep up - that
     // caps the latency instead of letting it grow.
-    const int MaxQueued = 6;
+    const int MaxQueued = 24;
     static readonly object qLock = new object();
     static readonly Queue<byte[]> outQ = new Queue<byte[]>();
 
@@ -442,6 +443,8 @@ class QuestCastRx
         {
             while (outQ.Count >= MaxQueued) { outQ.Dequeue(); lateDrops++; }
             outQ.Enqueue(au);
+            if (outQ.Count > qDepthMax) qDepthMax = outQ.Count;
+            qDepthSum += outQ.Count; qDepthN++;
             Monitor.Pulse(qLock);
         }
     }
@@ -589,7 +592,10 @@ class QuestCastRx
             Thread.Sleep(5000);
             long f = framesOut;
             Log("frames=" + f + " (+" + (f - prev) + "/5s) dropped=" + framesDropped +
-                " mbytes=" + (bytesOut / 1048576) + " datapkts=" + dataPkts + " audio=" + audioPkts + "/" + audioOut + " alate=" + audioLate + " late=" + lateDrops + " mdns_rx=" + mdnsRx);
+                " mbytes=" + (bytesOut / 1048576) + " datapkts=" + dataPkts + " audio=" + audioPkts + "/" + audioOut + " late=" + lateDrops +
+                " q=" + (qDepthN > 0 ? (qDepthSum / qDepthN) : 0) + "/" + qDepthMax +
+                " (~" + (qDepthN > 0 ? (qDepthSum / qDepthN * 33) : 0) + "ms)");
+            qDepthMax = 0; qDepthSum = 0; qDepthN = 0;
             prev = f;
         }
     }
