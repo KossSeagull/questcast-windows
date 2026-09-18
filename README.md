@@ -93,6 +93,22 @@ room hears the same thing twice, a fraction of a second apart. Give the player
 headphones — they hear the game with no delay either way, since capturing audio does not
 delay what the headset itself plays.
 
+## Passing the headset around
+
+A Quest stops casting the moment it decides it has been taken off — which is exactly what
+happens when you hand it to the next person, so the screen goes blank and someone has to
+reconnect. `QuestCast.exe` prevents that: while streaming it tells the headset the
+proximity sensor is covered, and puts it back to normal when you stop. The window shows
+which state you are in.
+
+This needs `adb` to reach the headset, so it is best effort. ADB over Wi-Fi does not
+survive a headset reboot — plug in a cable once at the start of an evening to enable it,
+and the window picks it up within ten seconds. Without adb everything still works; the
+stream just stops when the headset comes off.
+
+The low-tech alternative, which needs nothing and survives reboots, is a small sticker
+over the proximity sensor between the lenses.
+
 ## If the headset does not find the PC
 
 **Check the firewall first.** This is almost always the problem. Windows silently drops
@@ -121,12 +137,12 @@ second. Pass `--no-correct-pts --container-fps-override=30`, as the launcher doe
 design — that is the trade for low latency. They get much rarer if the PC is on
 Ethernet rather than Wi-Fi, because then the video only crosses the air once.
 
-**The stream stops when you take the headset off.** The sender stops when it goes to the
-background. To keep it running while the headset is off your head:
-
-```cmd
-adb shell am broadcast -a com.oculus.vrpowermanager.prox_close
-```
+**Do not put anything on top of the video.** Another window over the fullscreen player
+makes Windows throttle its presentation; the player falls behind and frames get dropped,
+and since keyframes arrive only once a second, every dropped frame breaks the picture
+until the next one. On modest graphics even the player's own on-screen display is enough
+to cause it. The status window minimises itself for this reason, and an overlay with live
+counters is deliberately not provided. Check the numbers before or after, not during.
 
 ## How it works
 
@@ -143,8 +159,10 @@ three things:
    the player falls behind. Doing that on the receive thread stops the socket being
    read, so datagrams are lost, which causes more stalling — a spiral that turned into
    several seconds of lag in testing. Finished units go to a writer thread through a
-   short queue instead, and the oldest are discarded when the player cannot keep
-   up, which caps latency instead of letting it grow.
+   short queue instead. The queue holds 24 frames: dropping one costs far more than it
+   saves, because a dropped frame breaks the picture until the next keyframe a second
+   later, and measured depth stays at 1-2 frames anyway, so the cap only absorbs
+   hiccups rather than adding delay.
 
 It also notices when the sender restarts numbering (a new session) or when the stream
 has a gap, and waits for fresh SPS/PPS or a keyframe before feeding the decoder again,
