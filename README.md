@@ -101,10 +101,15 @@ reconnect. `QuestCast.exe` prevents that: while streaming it tells the headset t
 proximity sensor is covered, and puts it back to normal when you stop. The window shows
 which state you are in.
 
-This needs `adb` to reach the headset, so it is best effort. ADB over Wi-Fi does not
-survive a headset reboot — plug in a cable once at the start of an evening to enable it,
-and the window picks it up within ten seconds. Without adb everything still works; the
-stream just stops when the headset comes off.
+This needs `adb` to reach the headset, so it is best effort — but in practice it is
+easy: plug a cable in for about ten seconds. The window rechecks every ten seconds,
+picks the headset up over USB, sends the command, and it stays in effect after you
+unplug, until the headset reboots. ADB over Wi-Fi works too, but it does not survive a
+headset reboot, so it is not worth setting up for this.
+
+Without adb everything still works; the stream just stops when the headset comes off.
+One caveat: the window restores the sensor when you stop, so if the headset is no longer
+reachable by then it will keep not sleeping until its next reboot.
 
 The low-tech alternative, which needs nothing and survives reboots, is a small sticker
 over the proximity sensor between the lenses.
