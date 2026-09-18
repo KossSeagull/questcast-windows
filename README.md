@@ -66,9 +66,9 @@ Video goes to stdout, progress and errors to stderr.
 
 ## Sound
 
-Run `questcast-play-audio.bat` instead, and turn on **Include headset audio** in the
-QuestCast app. Both are needed: the app decides whether sound is sent, the launcher
-decides whether it is played.
+Turn on **Include headset audio** in the QuestCast app. That is the only switch: the
+launcher always accepts sound, and when the app is not sending any there is simply
+nothing to play.
 
 The receiver plays the audio itself rather than feeding it to the player along with the
 video, and that is deliberate. The video path runs in "show each frame the moment it

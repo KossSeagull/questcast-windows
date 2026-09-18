@@ -1,6 +1,10 @@
 @echo off
 rem Receives the QuestCast stream and plays it fullscreen.
 rem
+rem Sound is always accepted. If "Include headset audio" is switched off in the app
+rem then none arrives and the flag does nothing, so the headset alone decides whether
+rem there is sound - no second launcher needed.
+rem
 rem Raw H.264 carries no timestamps, so the frame rate is pinned explicitly and pts
 rem correction is switched off. Without that mpv assumes 25 fps, and against a real
 rem 30 fps stream the delay grows by a second every few seconds.
@@ -19,7 +23,7 @@ if not exist "%RX%" (
   exit /b 1
 )
 
-"%RX%" %* 2> "%HERE%questcast.log" | "%MPV%" ^
+"%RX%" --audio %* 2> "%HERE%questcast.log" | "%MPV%" ^
   --fs ^
   --demuxer=lavf --demuxer-lavf-format=h264 ^
   --demuxer-lavf-analyzeduration=0 --demuxer-lavf-probe-info=nostreams ^
