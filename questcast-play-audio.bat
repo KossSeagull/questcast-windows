@@ -19,7 +19,7 @@ if not exist "%RX%" (
   exit /b 1
 )
 
-"%RX%" %* 2> "%HERE%questcast.log" | "%MPV%" ^
+"%RX%" --audio %* 2> "%HERE%questcast-audio.log" | "%MPV%" ^
   --fs ^
   --demuxer=lavf --demuxer-lavf-format=h264 ^
   --demuxer-lavf-analyzeduration=0 --demuxer-lavf-probe-info=nostreams ^

@@ -59,8 +59,33 @@ Options:
 | `--ip ADDRESS` | address to advertise over mDNS | interface that has a default gateway |
 | `--port PORT` | UDP port to listen on | `49152` |
 | `--name NAME` | name shown in the headset | `QuestCastPC` |
+| `--audio` | play the headset audio as well | off |
+| `--audio-delay MS` | hold the sound back to line it up with the picture | `100` |
 
 Video goes to stdout, progress and errors to stderr.
+
+## Sound
+
+Run `questcast-play-audio.bat` instead, and turn on **Include headset audio** in the
+QuestCast app. Both are needed: the app decides whether sound is sent, the launcher
+decides whether it is played.
+
+The receiver plays the audio itself rather than feeding it to the player along with the
+video, and that is deliberate. The video path runs in "show each frame the moment it
+arrives" mode, which is what keeps latency down; handing a player two tracks would force
+it into timestamp-following mode and cost a few hundred milliseconds. So the sound is
+played separately and simply held back to meet the picture.
+
+How long to hold it depends on your screen — a TV's own image processing is usually the
+largest part of the delay. Tune it by ear while the stream is running: write a number of
+milliseconds into `audio-delay.txt` next to the executable and it takes effect within a
+second, no reconnecting. Sound lagging behind the picture means the number is too high.
+On the setup this was developed against, 100 ms lined up.
+
+Note that a Quest's speakers are open, so with sound on both the headset and the TV the
+room hears the same thing twice, a fraction of a second apart. Give the player
+headphones — they hear the game with no delay either way, since capturing audio does not
+delay what the headset itself plays.
 
 ## If the headset does not find the PC
 

@@ -21,6 +21,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
@@ -37,16 +38,32 @@ class QuestCastRx
     static IPAddress localIp = IPAddress.Loopback;
     static Stream stdout;
     static long framesOut = 0, framesDropped = 0, bytesOut = 0;
-    static long mdnsRx = 0, mdnsTx = 0, dataPkts = 0, lateDrops = 0;
+    static long mdnsRx = 0, mdnsTx = 0, dataPkts = 0, lateDrops = 0, audioPkts = 0, audioOut = 0, audioLate = 0;
 
     // Writing to the player's pipe blocks whenever it falls behind. Doing that on the
     // receive thread stops us reading the socket, so datagrams get lost and the picture
     // breaks up. Hand finished access units to a writer thread through a short queue
     // instead, and throw away the oldest ones when the player cannot keep up - that
     // caps the latency instead of letting it grow.
-    const int MaxQueued = 4;
+    const int MaxQueued = 6;
     static readonly object qLock = new object();
     static readonly Queue<byte[]> outQ = new Queue<byte[]>();
+
+    // Audio (optional). The video path deliberately runs "show each frame as it lands",
+    // which is what keeps latency low, so mixing sound into the same stream would force
+    // the player into timestamp-following mode and cost a few hundred ms. Instead the
+    // audio is played here, held back by audioDelayMs so it lines up with the picture
+    // (the TV and the decoder put the video several hundred ms behind the sound).
+    static bool audioEnabled = false;
+    static int audioDelayMs = 100;
+    static readonly object aLock = new object();
+    static readonly Queue<AudioChunk> audioQ = new Queue<AudioChunk>();
+
+    struct AudioChunk
+    {
+        public DateTime Arrived;
+        public byte[] Pcm;
+    }
 
     static void Main(string[] argv)
     {
@@ -59,6 +76,8 @@ class QuestCastRx
             else if (a == "--ip" && next != null) { wantIp = next; i++; }
             else if (a == "--port" && next != null) { DataPort = int.Parse(next); i++; }
             else if (a == "--name" && next != null) { wantName = next; i++; }
+            else if (a == "--audio") audioEnabled = true;
+            else if (a == "--audio-delay" && next != null) { audioDelayMs = int.Parse(next); i++; }
             else if (!a.StartsWith("-")) wantIp = a;          // bare address, for convenience
             else { Console.Error.WriteLine("unknown option: " + a); Usage(); return; }
         }
@@ -80,9 +99,24 @@ class QuestCastRx
         writer.IsBackground = true;
         writer.Start();
 
+        if (audioEnabled)
+        {
+            Log("audio enabled, delayed by " + audioDelayMs + " ms to match the picture");
+            var audio = new Thread(AudioLoop);
+            audio.IsBackground = true;
+            audio.Start();
+        }
+
         var stats = new Thread(StatsLoop);
         stats.IsBackground = true;
         stats.Start();
+
+        if (audioEnabled)
+        {
+            var tuner = new Thread(DelayTunerLoop);
+            tuner.IsBackground = true;
+            tuner.Start();
+        }
 
         VideoLoop();
     }
@@ -101,6 +135,10 @@ class QuestCastRx
             "  --ip ADDRESS   address to advertise (default: the interface with a gateway)\n" +
             "  --port PORT    UDP port to listen on (default: 49152)\n" +
             "  --name NAME    name shown in the headset (default: QuestCastPC)\n" +
+            "  --audio        play the headset audio (enable it in the app too)\n" +
+            "  --audio-delay MS  hold sound back to line up with the picture (default: 100)\n" +
+            "                 retune it while playing by writing a number into\n" +
+            "                 audio-delay.txt next to the executable\n" +
             "\n" +
             "Pipe the output into a player, for example:\n" +
             "  QuestCastRx.exe | mpv --demuxer=lavf --demuxer-lavf-format=h264 \\\n" +
@@ -169,6 +207,7 @@ class QuestCastRx
         Log("listening for video on udp/" + DataPort);
 
         var pending = new Dictionary<uint, Pending>();
+        var audioPending = new Dictionary<uint, Pending>();
         var buf = new byte[2048];
         EndPoint any = new IPEndPoint(IPAddress.Any, 0);
 
@@ -187,7 +226,12 @@ class QuestCastRx
             if (n < 24) continue;
             dataPkts++;
 
-            // video only; audio ("QCTA") is ignored
+            if (buf[0] == 'Q' && buf[1] == 'C' && buf[2] == 'T' && buf[3] == 'A')
+            {
+                audioPkts++;
+                if (audioEnabled) HandleAudio(buf, n, audioPending);
+                continue;
+            }
             if (!(buf[0] == 'Q' && buf[1] == 'C' && buf[2] == 'T' && buf[3] == 'V')) continue;
             if (buf[4] != 1) continue;
 
@@ -297,6 +341,101 @@ class QuestCastRx
         bytesOut += au.Length;
     }
 
+    // ---------------- audio ----------------
+
+    // Audio access units are fragmented exactly like video ones, but numbered
+    // independently. ~10 ms of 48 kHz stereo PCM per unit, so usually two datagrams.
+    static void HandleAudio(byte[] buf, int n, Dictionary<uint, Pending> pending)
+    {
+        int headerLen = (buf[6] << 8) | buf[7];
+        if (headerLen < 24 || headerLen > n) return;
+
+        uint id = (uint)((buf[8] << 24) | (buf[9] << 16) | (buf[10] << 8) | buf[11]);
+        int idx = (buf[12] << 8) | buf[13];
+        int cnt = (buf[14] << 8) | buf[15];
+        if (cnt <= 0 || idx >= cnt) return;
+
+        int len = n - headerLen;
+        if (len <= 0) return;
+
+        var payload = new byte[len];
+        Buffer.BlockCopy(buf, headerLen, payload, 0, len);
+
+        if (cnt == 1) { QueueAudio(payload); return; }
+
+        Pending p;
+        if (!pending.TryGetValue(id, out p))
+        {
+            p = new Pending();
+            p.Frags = new byte[cnt][];
+            p.Count = cnt;
+            p.First = DateTime.UtcNow;
+            pending[id] = p;
+        }
+        if (p.Frags[idx] == null) { p.Frags[idx] = payload; p.Have++; p.Bytes += len; }
+
+        if (p.Have == p.Count)
+        {
+            var pcm = new byte[p.Bytes];
+            int off = 0;
+            for (int i = 0; i < p.Count; i++)
+            {
+                Buffer.BlockCopy(p.Frags[i], 0, pcm, off, p.Frags[i].Length);
+                off += p.Frags[i].Length;
+            }
+            pending.Remove(id);
+            QueueAudio(pcm);
+        }
+
+        if (pending.Count > 64)
+        {
+            var dead = new List<uint>();
+            foreach (var kv in pending)
+                if ((DateTime.UtcNow - kv.Value.First).TotalMilliseconds > 200) dead.Add(kv.Key);
+            foreach (var k in dead) pending.Remove(k);
+        }
+    }
+
+    // Lining sound up with the picture is a matter of taste and of how much lag the
+    // display adds, so allow it to be retuned while playing: drop a number of
+    // milliseconds into audio-delay.txt next to the executable and it takes effect.
+    static void DelayTunerLoop()
+    {
+        string path = Path.Combine(
+            Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location),
+            "audio-delay.txt");
+        while (true)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    int ms;
+                    if (int.TryParse(File.ReadAllText(path).Trim(), out ms) && ms >= 0 && ms <= 3000 && ms != audioDelayMs)
+                    {
+                        audioDelayMs = ms;
+                        Log("audio delay set to " + ms + " ms");
+                        lock (aLock) Monitor.PulseAll(aLock);
+                    }
+                }
+            }
+            catch { }
+            Thread.Sleep(1000);
+        }
+    }
+
+    static void QueueAudio(byte[] pcm)
+    {
+        lock (aLock)
+        {
+            // Cap the backlog. If playback cannot keep up, drop the oldest audio rather
+            // than letting the delay creep upwards.
+            while (audioQ.Count > 300) audioQ.Dequeue();
+            audioQ.Enqueue(new AudioChunk { Arrived = DateTime.UtcNow, Pcm = pcm });
+            Monitor.Pulse(aLock);
+        }
+    }
+
     static void Enqueue(byte[] au)
     {
         lock (qLock)
@@ -304,6 +443,122 @@ class QuestCastRx
             while (outQ.Count >= MaxQueued) { outQ.Dequeue(); lateDrops++; }
             outQ.Enqueue(au);
             Monitor.Pulse(qLock);
+        }
+    }
+
+    // --- playback through winmm, so there is no external dependency ---
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct WAVEFORMATEX
+    {
+        public ushort wFormatTag, nChannels;
+        public uint nSamplesPerSec, nAvgBytesPerSec;
+        public ushort nBlockAlign, wBitsPerSample, cbSize;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct WAVEHDR
+    {
+        public IntPtr lpData;
+        public uint dwBufferLength, dwBytesRecorded;
+        public IntPtr dwUser;
+        public uint dwFlags, dwLoops;
+        public IntPtr lpNext, reserved;
+    }
+
+    const uint WHDR_DONE = 0x00000001;
+
+    [DllImport("winmm.dll")] static extern int waveOutOpen(out IntPtr h, uint dev, ref WAVEFORMATEX f, IntPtr cb, IntPtr inst, uint flags);
+    [DllImport("winmm.dll")] static extern int waveOutPrepareHeader(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] static extern int waveOutUnprepareHeader(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] static extern int waveOutWrite(IntPtr h, IntPtr hdr, int size);
+    [DllImport("winmm.dll")] static extern int waveOutClose(IntPtr h);
+
+    class Slot
+    {
+        public IntPtr Hdr, Data;
+        public int Capacity;
+        public bool Queued;
+    }
+
+    static void AudioLoop()
+    {
+        var fmt = new WAVEFORMATEX();
+        fmt.wFormatTag = 1;                     // PCM
+        fmt.nChannels = 2;
+        fmt.nSamplesPerSec = 48000;
+        fmt.wBitsPerSample = 16;
+        fmt.nBlockAlign = (ushort)(fmt.nChannels * fmt.wBitsPerSample / 8);
+        fmt.nAvgBytesPerSec = fmt.nSamplesPerSec * fmt.nBlockAlign;
+        fmt.cbSize = 0;
+
+        IntPtr dev;
+        int rc = waveOutOpen(out dev, 0xFFFFFFFF /* WAVE_MAPPER */, ref fmt, IntPtr.Zero, IntPtr.Zero, 0);
+        if (rc != 0) { Log("audio device could not be opened (error " + rc + "), continuing without sound"); return; }
+
+        int hdrSize = Marshal.SizeOf(typeof(WAVEHDR));
+        var slots = new Slot[24];
+        for (int i = 0; i < slots.Length; i++)
+        {
+            slots[i] = new Slot();
+            slots[i].Capacity = 8192;
+            slots[i].Data = Marshal.AllocHGlobal(slots[i].Capacity);
+            slots[i].Hdr = Marshal.AllocHGlobal(hdrSize);
+        }
+
+        while (true)
+        {
+            AudioChunk chunk;
+            lock (aLock)
+            {
+                while (audioQ.Count == 0) Monitor.Wait(aLock);
+                chunk = audioQ.Peek();
+
+                // Hold each chunk back until it is as old as the video pipeline's own
+                // delay, so sound and picture line up.
+                double waited = (DateTime.UtcNow - chunk.Arrived).TotalMilliseconds;
+                if (waited < audioDelayMs)
+                {
+                    Monitor.Wait(aLock, (int)Math.Max(1, audioDelayMs - waited));
+                    continue;
+                }
+                audioQ.Dequeue();
+            }
+
+            Slot slot = null;
+            foreach (var s in slots)
+            {
+                if (!s.Queued) { slot = s; break; }
+                var h = (WAVEHDR)Marshal.PtrToStructure(s.Hdr, typeof(WAVEHDR));
+                if ((h.dwFlags & WHDR_DONE) != 0)
+                {
+                    waveOutUnprepareHeader(dev, s.Hdr, hdrSize);
+                    s.Queued = false;
+                    slot = s;
+                    break;
+                }
+            }
+            if (slot == null) { audioLate++; continue; }   // device backed up; skip this chunk
+
+            if (chunk.Pcm.Length > slot.Capacity)
+            {
+                Marshal.FreeHGlobal(slot.Data);
+                slot.Capacity = chunk.Pcm.Length;
+                slot.Data = Marshal.AllocHGlobal(slot.Capacity);
+            }
+            Marshal.Copy(chunk.Pcm, 0, slot.Data, chunk.Pcm.Length);
+
+            var hdr = new WAVEHDR();
+            hdr.lpData = slot.Data;
+            hdr.dwBufferLength = (uint)chunk.Pcm.Length;
+            Marshal.StructureToPtr(hdr, slot.Hdr, false);
+
+            if (waveOutPrepareHeader(dev, slot.Hdr, hdrSize) == 0 &&
+                waveOutWrite(dev, slot.Hdr, hdrSize) == 0)
+            {
+                slot.Queued = true;
+                audioOut++;
+            }
         }
     }
 
@@ -334,7 +589,7 @@ class QuestCastRx
             Thread.Sleep(5000);
             long f = framesOut;
             Log("frames=" + f + " (+" + (f - prev) + "/5s) dropped=" + framesDropped +
-                " mbytes=" + (bytesOut / 1048576) + " datapkts=" + dataPkts + " late=" + lateDrops + " mdns_rx=" + mdnsRx);
+                " mbytes=" + (bytesOut / 1048576) + " datapkts=" + dataPkts + " audio=" + audioPkts + "/" + audioOut + " alate=" + audioLate + " late=" + lateDrops + " mdns_rx=" + mdnsRx);
             prev = f;
         }
     }
