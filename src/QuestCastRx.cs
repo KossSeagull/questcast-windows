@@ -55,7 +55,7 @@ class QuestCastRx
     // audio is played here, held back by audioDelayMs so it lines up with the picture
     // (the TV and the decoder put the video several hundred ms behind the sound).
     static bool audioEnabled = false;
-    static int audioDelayMs = 100;
+    static int audioDelayMs = 0;
     static readonly object aLock = new object();
     static readonly Queue<AudioChunk> audioQ = new Queue<AudioChunk>();
 
@@ -136,7 +136,7 @@ class QuestCastRx
             "  --port PORT    UDP port to listen on (default: 49152)\n" +
             "  --name NAME    name shown in the headset (default: QuestCastPC)\n" +
             "  --audio        play the headset audio (enable it in the app too)\n" +
-            "  --audio-delay MS  hold sound back to line up with the picture (default: 100)\n" +
+            "  --audio-delay MS  hold sound back to line up with the picture (default: 0)\n" +
             "                 retune it while playing by writing a number into\n" +
             "                 audio-delay.txt next to the executable\n" +
             "\n" +

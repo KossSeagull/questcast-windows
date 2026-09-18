@@ -32,4 +32,5 @@ if not exist "%RX%" (
   --no-correct-pts --container-fps-override=30 ^
   --framedrop=vo ^
   --hwdec=auto --vo=gpu ^
+  --force-window=no ^
   --no-terminal --keep-open=no --title=QuestCast -

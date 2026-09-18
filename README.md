@@ -29,13 +29,16 @@ build.cmd
 powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-`build.cmd` compiles `QuestCastRx.exe` with the C# compiler already present in Windows.
+`build.cmd` compiles both executables with the C# compiler already present in Windows:
+`QuestCastRx.exe` (the receiver) and `QuestCast.exe` (a small status window that starts
+everything and shows whether the headset is connected).
 `install.ps1` adds the firewall rules described below — it needs an elevated prompt, and
 it is the step people most often skip.
 
 ## Run
 
-Start the receiver and the player together:
+Run `QuestCast.exe` for a window that starts everything and shows the state of the
+stream, or `questcast-play.bat` to go straight to the picture with no window:
 
 ```cmd
 questcast-play.bat
@@ -60,7 +63,7 @@ Options:
 | `--port PORT` | UDP port to listen on | `49152` |
 | `--name NAME` | name shown in the headset | `QuestCastPC` |
 | `--audio` | play the headset audio as well | off |
-| `--audio-delay MS` | hold the sound back to line it up with the picture | `100` |
+| `--audio-delay MS` | hold the sound back to line it up with the picture | `0` |
 
 Video goes to stdout, progress and errors to stderr.
 
@@ -76,11 +79,14 @@ arrives" mode, which is what keeps latency down; handing a player two tracks wou
 it into timestamp-following mode and cost a few hundred milliseconds. So the sound is
 played separately and simply held back to meet the picture.
 
-How long to hold it depends on your screen — a TV's own image processing is usually the
-largest part of the delay. Tune it by ear while the stream is running: write a number of
-milliseconds into `audio-delay.txt` next to the executable and it takes effect within a
-second, no reconnecting. Sound lagging behind the picture means the number is too high.
-On the setup this was developed against, 100 ms lined up.
+By default it is not held back at all, because Windows' own audio path already adds
+roughly as much delay as the video path does — on the setup this was developed against,
+zero lined up best. Your screen may differ, since a TV's image processing is usually the
+largest single part of the delay, so tune it by ear while the stream is running: write a
+number of milliseconds into `audio-delay.txt` next to the executable and it takes effect
+within a second, no reconnecting. Sound lagging behind the picture means the number is
+too high; there is nothing below zero, so if it still lags at zero the remaining delay is
+in the audio device rather than here.
 
 Note that a Quest's speakers are open, so with sound on both the headset and the TV the
 room hears the same thing twice, a fraction of a second apart. Give the player
@@ -137,7 +143,7 @@ three things:
    the player falls behind. Doing that on the receive thread stops the socket being
    read, so datagrams are lost, which causes more stalling — a spiral that turned into
    several seconds of lag in testing. Finished units go to a writer thread through a
-   four-frame queue instead, and the oldest are discarded when the player cannot keep
+   short queue instead, and the oldest are discarded when the player cannot keep
    up, which caps latency instead of letting it grow.
 
 It also notices when the sender restarts numbering (a new session) or when the stream
